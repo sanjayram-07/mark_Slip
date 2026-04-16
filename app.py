@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import the mark slip generation functions
-from a1 import extract_students, build_slip, combine_slips_simple, create_mit_logo
+from a1 import extract_students, build_slip, combine_slips_simple
 
 # Configure logging
 logging.basicConfig(
@@ -72,6 +72,9 @@ else:
 
 # Create upload folder if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+LOGOS_DIR = os.path.join(os.path.dirname(__file__), "logos")
+LEFT_LOGO_PATH = os.path.join(LOGOS_DIR, "left.png")
 
 
 def allowed_file(filename):
@@ -137,27 +140,23 @@ def process_pdf():
             file.save(temp_input)
             logger.info(f"File uploaded: {filename}")
 
-            # Create MIT logo
             temp_dir = tempfile.mkdtemp()
-            logo_path = create_mit_logo(os.path.join(temp_dir, "mit_logo.png"), size=60)
 
-            # Extract student data
             logger.info(f"[1/3] Reading PDF: {temp_input}")
-            students = extract_students(temp_input)
+            students, meta = extract_students(temp_input)
             logger.info(f"      Found {len(students)} student(s)")
 
             if not students:
                 logger.warning(f"No student data found in {filename}")
                 return jsonify({'error': 'No student data found in PDF. Check PDF format.'}), 400
 
-            # Generate individual slips
             logger.info("[2/3] Generating individual slips with logo...")
             slip_paths = []
 
             for i, student in enumerate(students, start=1):
                 safe_name = re.sub(r"[^\w]", "_", student["reg_no"] or f"student_{i}")
                 out_path = os.path.join(temp_dir, f"{safe_name}.pdf")
-                build_slip(student, out_path, college_name, dept_name, logo_path)
+                build_slip(student, meta, out_path, LEFT_LOGO_PATH, None)
                 slip_paths.append(out_path)
                 logger.debug(f"      [{i}/{len(students)}] Generated slip for {student.get('name', 'Unknown')}")
 

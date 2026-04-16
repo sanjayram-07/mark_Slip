@@ -1,578 +1,418 @@
 """
-Student Mark Slip Generator
------------------------------
-- Reads multi-page PDF (summary sheets or individual pages)
-- Extracts: Register Number, Student Name, and subject rows
-  (Course Code | Course Name | Grade | Result)
-- Generates A4 PDF with formatted slips (2 per page)
-- Combines all slips into a single print-ready PDF
+Student Mark Slip Generator - Fixed Version
+- Reads Anna University Result Sheet PDF (horizontal format)
+- Extracts logos embedded in the PDF (Anna University + ACOE)
+- Each row = one student, subject grades in columns
+- Generates formatted A4 slips with proper course names
+- Combines into one print-ready PDF
 
 Usage:
     pip install pdfplumber reportlab pypdf
-    python generate_slips.py --input marks.pdf
+    python generate_slips.py --input marks.pdf --outdir slips
 """
 
 import os
 import re
 import argparse
 import pdfplumber
-from reportlab.lib.pagesizes import A5, A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Paragraph,
-    Spacer, HRFlowable, Image, Flowable
+    SimpleDocTemplate, Table, TableStyle,
+    Paragraph, Spacer, Image as RLImage
 )
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 from pypdf import PdfReader, PdfWriter
-from io import BytesIO
 
 
-# ── Colours ──────────────────────────────────────────────────────────────────
-HEADER_BG   = colors.HexColor("#1a3a5c")   # dark navy
-ROW_ALT     = colors.HexColor("#eef3f8")   # light blue-grey
-BORDER      = colors.HexColor("#1a3a5c")
-ACCENT      = colors.HexColor("#c8102e")   # red accent for college feel
+# ── Known Course Name Map ─────────────────────────────────────────────────────
+COURSE_NAME_MAP = {
+    "CS23101": "Computational Thinking",
+    "CS23C04": "Programming in C",
+    "EE23C02": "Fundamentals of Electrical and Electronics Engineering",
+    "EN23C01": "Foundation English",
+    "MA23C01": "Matrices and Calculus",
+    "PH23C01": "Engineering Physics",
+    "UC23H01": "Heritage of Tamils / Tamil Ilakanam",
+}
 
 
-# ── Logo Generation ──────────────────────────────────────────────────────────
-def create_mit_logo(path: str = "mit_logo.png", size: int = 60):
-    """Create MIT logo placeholder"""
-    # Return path without creating actual image
-    # Logo will be handled as text in the slip layout
-    return None
+
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 def make_styles():
     return {
-        "title": ParagraphStyle(
-            "title", fontName="Helvetica-Bold", fontSize=11,
-            textColor=colors.white, alignment=TA_CENTER, leading=14
+        "college_name": ParagraphStyle(
+            "college_name", fontName="Helvetica-Bold", fontSize=12,
+            textColor=colors.black, alignment=TA_CENTER, leading=16
         ),
-        "subtitle": ParagraphStyle(
-            "subtitle", fontName="Helvetica", fontSize=8,
-            textColor=colors.white, alignment=TA_CENTER, leading=10
+        "college_sub": ParagraphStyle(
+            "college_sub", fontName="Helvetica", fontSize=9,
+            textColor=colors.black, alignment=TA_CENTER, leading=12
+        ),
+        "section_title": ParagraphStyle(
+            "section_title", fontName="Helvetica-Bold", fontSize=10,
+            textColor=colors.black, alignment=TA_CENTER,
+            leading=13, spaceAfter=3
         ),
         "label": ParagraphStyle(
-            "label", fontName="Helvetica-Bold", fontSize=8,
-            textColor=colors.HexColor("#444444"), leading=10
+            "label", fontName="Helvetica-Bold", fontSize=8.5,
+            textColor=colors.black, leading=11
         ),
         "value": ParagraphStyle(
-            "value", fontName="Helvetica", fontSize=8,
-            textColor=colors.black, leading=10
+            "value", fontName="Helvetica", fontSize=8.5,
+            textColor=colors.black, leading=11
         ),
         "th": ParagraphStyle(
-            "th", fontName="Helvetica-Bold", fontSize=7.5,
-            textColor=colors.white, alignment=TA_CENTER
+            "th", fontName="Helvetica-Bold", fontSize=8,
+            textColor=colors.black, alignment=TA_CENTER, leading=10
         ),
         "td": ParagraphStyle(
-            "td", fontName="Helvetica", fontSize=7.5,
-            textColor=colors.black, alignment=TA_LEFT
+            "td", fontName="Helvetica", fontSize=8,
+            textColor=colors.black, alignment=TA_LEFT, leading=10
         ),
         "td_center": ParagraphStyle(
-            "td_center", fontName="Helvetica", fontSize=7.5,
-            textColor=colors.black, alignment=TA_CENTER
+            "td_center", fontName="Helvetica", fontSize=8,
+            textColor=colors.black, alignment=TA_CENTER, leading=10
         ),
         "footer": ParagraphStyle(
-            "footer", fontName="Helvetica-Oblique", fontSize=6.5,
-            textColor=colors.grey, alignment=TA_CENTER
+            "footer", fontName="Helvetica-Oblique", fontSize=7,
+            textColor=colors.black, alignment=TA_CENTER, leading=9
+        ),
+        "sign_label": ParagraphStyle(
+            "sign_label", fontName="Helvetica", fontSize=8,
+            textColor=colors.black, alignment=TA_CENTER, leading=10
         ),
     }
 
 
-# ── PDF Extraction ────────────────────────────────────────────────────────────
-def extract_students(pdf_path: str) -> list[dict]:
+def load_logo(path, max_width=25*mm, max_height=25*mm):
+    if path and os.path.exists(path):
+        try:
+            return RLImage(path, width=max_width, height=max_height)
+        except Exception:
+            pass
+    return Spacer(1, max_height)
+
+
+# ── PDF Data Extraction ───────────────────────────────────────────────────────
+def extract_students(pdf_path):
     """
-    Parse PDF and extract student data.
-    Supports multiple formats:
-    1. Individual pages per student (old format)
-    2. Summary sheet with students as columns (new format)
-    
-    Returns a list of dicts:
-        { "reg_no": str, "name": str, "semester": str,
-          "subjects": [{"code","name","grade","result"}, ...] }
+    Parse Anna University Result Sheet PDF (horizontal format).
+    Header row has subject codes; each data row = one student.
     """
     students = []
+    meta = {
+        "campus":     "Madras Institute of Technology",
+        "dept":       "68 - Computer Technology",
+        "branch":     "503 - B.E Computer Science and Engineering",
+        "semester":   "1",
+        "session":    "NOV - 2025",
+        "mode":       "Full Time",
+        "regulation": "2023",
+    }
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
+            text  = page.extract_text() or ""
             lines = [l.strip() for l in text.splitlines() if l.strip()]
-            tables = page.extract_tables()
 
-            # Try format 1: Individual student per page
-            student = {
-                "reg_no": "",
-                "name": "",
-                "semester": "First Semester Result - Nov / Dec 2025",
-                "subjects": [],
-                "page": page_num,
-            }
-
-            # Extract Register Number and Name from text
             for line in lines:
-                if re.search(r"register\s*number", line, re.I):
-                    m = re.search(r"register\s*number\s*[:\-]?\s*(\S+)", line, re.I)
-                    if m:
-                        student["reg_no"] = m.group(1)
-                if re.search(r"student\s*name", line, re.I):
-                    m = re.search(r"student\s*name\s*[:\-]?\s*(.+)", line, re.I)
-                    if m:
-                        student["name"] = m.group(1).strip()
-                if re.search(r"semester\s*result", line, re.I):
-                    student["semester"] = line.strip()
+                if re.search(r"campus\s*:", line, re.I):
+                    m = re.search(r"campus\s*:\s*(.+)", line, re.I)
+                    if m: meta["campus"] = m.group(1).strip()
+                if re.search(r"department\s*:", line, re.I):
+                    m = re.search(r"department\s*:\s*(.+)", line, re.I)
+                    if m: meta["dept"] = m.group(1).strip()
+                if re.search(r"session\s*:", line, re.I):
+                    m = re.search(r"session\s*:\s*(.+)", line, re.I)
+                    if m: meta["session"] = m.group(1).strip()
+                if re.search(r"semester\s*:\s*(\d)", line, re.I):
+                    m = re.search(r"semester\s*:\s*(\d)", line, re.I)
+                    if m: meta["semester"] = m.group(1).strip()
+                if re.search(r"regulation\s*:", line, re.I):
+                    m = re.search(r"regulation\s*:\s*(\d+)", line, re.I)
+                    if m: meta["regulation"] = m.group(1).strip()
+                if re.search(r"mode\s*:", line, re.I):
+                    m = re.search(r"mode\s*:\s*(.+)", line, re.I)
+                    if m: meta["mode"] = m.group(1).strip()
+                if re.search(r"branch\s*:", line, re.I):
+                    m = re.search(r"branch\s*:\s*(.+)", line, re.I)
+                    if m: meta["branch"] = m.group(1).strip()
 
-            # Extract subjects from tables (Format 1)
-            if tables:
-                for table in tables:
-                    for row in table:
-                        if row is None:
-                            continue
-                        cells = [str(c).strip() if c else "" for c in row]
-                        cell_text = " ".join(cells).lower()
-                        
-                        # Skip header rows
-                        if any(h in cell_text for h in ["s.no", "course code", "s. no", "course name", "result"]):
-                            continue
-                        
-                        # Format 1: Check if first cell is a number (subject row)
-                        if len(cells) >= 4 and cells[0] and re.match(r"^\d+$", cells[0].strip()):
-                            subject = {
-                                "code":   cells[1] if len(cells) > 1 else "",
-                                "name":   cells[2] if len(cells) > 2 else "",
-                                "grade":  cells[3] if len(cells) > 3 else "",
-                                "result": cells[4] if len(cells) > 4 else "",
-                            }
-                            student["subjects"].append(subject)
-
-            # If format 1 found data, add it
-            if student["reg_no"] or student["name"] or student["subjects"]:
-                students.append(student)
-                continue
-
-            # Try format 2: Summary sheet (students as columns)
-            # This format typically has subjects in rows and students in columns
-            summary_students = extract_from_summary_sheet(table=tables[0] if tables else None, 
-                                                         text_lines=lines, page_num=page_num)
-            if summary_students:
-                students.extend(summary_students)
-
-    return students if students else extract_from_summary_sheet_full(pdf_path)
-
-
-def extract_from_summary_sheet(table, text_lines, page_num):
-    """Extract students from a summary sheet format (students as columns)"""
-    if not table or len(table) < 3:
-        return []
-    
-    summary_students = []
-    
-    # The first row might have roll numbers or student identifiers
-    # Subsequent rows have subjects with their marks
-    
-    try:
-        header_row = table[0]
-        header = [str(h).strip() if h else "" for h in header_row]
-        
-        # Find where actual student data starts (typically after subject info columns)
-        # Usually: S.No | Subject | Code | ... | Student1 | Student2 | etc.
-        student_start_idx = None
-        
-        for idx, cell in enumerate(header):
-            # Look for roll numbers, registration numbers in header
-            if re.match(r"\d{2,}", cell.replace("-", "").replace("_", "").strip()):
-                student_start_idx = idx
-                break
-        
-        if student_start_idx is None and len(header) > 4:
-            # Assume students start after 4 columns (S.No, Code, Name, etc.)
-            student_start_idx = 4
-        elif student_start_idx is None:
-            return []
-        
-        # Extract student info from header
-        student_identifiers = header[student_start_idx:]
-        
-        # Create a student entry for each column
-        for col_idx, identifier in enumerate(student_identifiers):
-            if not identifier or identifier.lower() in ["total", "average", "remarks"]:
-                continue
-            
-            new_student = {
-                "reg_no": identifier,
-                "name": f"Student {col_idx + 1}",
-                "semester": "First Semester Result - Nov / Dec 2025",
-                "subjects": [],
-                "page": page_num,
-            }
-            
-            # Extract marks for this student from subsequent rows
-            for row_idx in range(1, len(table)):
-                row = table[row_idx]
-                if not row or len(row) <= student_start_idx + col_idx:
+            tables = page.extract_tables()
+            for table in tables:
+                if not table or len(table) < 2:
                     continue
-                
-                row_cells = [str(cell).strip() if cell else "" for cell in row]
-                
-                # Get subject info (typically in first few columns)
-                subject_code = row_cells[1] if len(row_cells) > 1 else ""
-                subject_name = row_cells[2] if len(row_cells) > 2 else ""
-                
-                # If no clear subject name, try first column
-                if not subject_code and row_cells[0]:
-                    subject_code = row_cells[0]
-                
-                # Skip header/empty rows
-                if "course" in subject_code.lower() or "subject" in subject_code.lower():
-                    continue
-                if not subject_code:
-                    continue
-                
-                # Get mark for this student
-                mark = row_cells[student_start_idx + col_idx] if len(row_cells) > student_start_idx + col_idx else ""
-                
-                if mark and mark not in ["", "—", "-", "N/A"]:
-                    subject = {
-                        "code": subject_code,
-                        "name": subject_name,
-                        "grade": mark,
-                        "result": "PASS" if mark and mark not in ["AB", "F"] else "FAIL",
-                    }
-                    new_student["subjects"].append(subject)
-            
-            if new_student["subjects"]:
-                summary_students.append(new_student)
-    
-    except Exception as e:
-        print(f"Error extracting from summary sheet: {e}")
-    
-    return summary_students
 
+                # Find header row with subject codes
+                header_row_idx = None
+                for idx, row in enumerate(table):
+                    cells = [str(c).strip() if c else "" for c in row]
+                    subj_cols = [c for c in cells if re.match(r"^[A-Z]{2}\d{2}[A-Z0-9]{2,}$", c.strip().upper())]
+                    if len(subj_cols) >= 3:
+                        header_row_idx = idx
+                        break
 
-def extract_from_summary_sheet_full(pdf_path):
-    """Better extraction for summary sheets by analyzing structure"""
-    students = []
-    
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables()
-                if not tables:
+                if header_row_idx is None:
                     continue
-                
-                for table in tables:
-                    if len(table) < 3 or len(table[0]) < 5:
+
+                header       = [str(c).strip() if c else "" for c in table[header_row_idx]]
+                lower_header = [c.lower() for c in header]
+
+                reg_idx  = next((i for i, c in enumerate(lower_header) if "register" in c), 1)
+                name_idx = next((i for i, c in enumerate(lower_header) if "name" in c), 2)
+
+                subject_cols = [
+                    (i, cell) for i, cell in enumerate(header)
+                    if re.match(r"^[A-Z]{2}\d{2}[A-Z0-9]{2,}$", str(cell).strip().upper())
+                ]
+                gpa_idx = next(
+                    (i for i, c in enumerate(lower_header) if c in ["gpa", "cgpa"]), None
+                )
+
+                for row in table[header_row_idx + 1:]:
+                    if not row:
                         continue
-                    
-                    rows = [[str(cell).strip() if cell else "" for cell in row] for row in table]
-                    
-                    # Detect header row (usually has subject codes or names)
-                    header = rows[0]
-                    
-                    # Find student columns (look for patterns like roll numbers)
-                    student_cols = []
-                    for idx, cell in enumerate(header):
-                        if re.search(r"\d+", cell) and len(cell) < 20:
-                            student_cols.append((idx, cell))
-                    
-                    # If fewer than 2 student columns, try alternate detection
-                    if len(student_cols) < 2 and len(header) > 4:
-                        for idx in range(3, len(header)):
-                            student_cols.append((idx, header[idx]))
-                    
-                    if not student_cols:
+                    cells = [str(c).strip() if c else "" for c in row]
+                    if not cells[0] or not re.match(r"^\d+$", cells[0].strip()):
                         continue
-                    
-                    # Extract subjects and marks
-                    subjects_data = []
-                    for row_idx in range(1, len(rows)):
-                        row = rows[row_idx]
-                        if not any(row[:3]):  # Skip empty rows
+
+                    reg_no = cells[reg_idx]  if reg_idx  < len(cells) else ""
+                    name   = cells[name_idx] if name_idx < len(cells) else ""
+                    gpa    = cells[gpa_idx]  if gpa_idx is not None and gpa_idx < len(cells) else ""
+
+                    if not reg_no and not name:
+                        continue
+
+                    subjects = []
+                    for col_idx, code in subject_cols:
+                        grade = cells[col_idx].strip() if col_idx < len(cells) else ""
+                        if not grade:
                             continue
-                        
-                        # Subject info in first 3 columns
-                        s_no = row[0] if len(row) > 0 else ""
-                        code = row[1] if len(row) > 1 else ""
-                        name = row[2] if len(row) > 2 else ""
-                        
-                        # Check if first cell looks like subject number
-                        if not re.match(r"^\d+$", s_no.strip()):
-                            code, name = s_no, code
-                        
-                        if code and code.lower() not in ["course", "subject", "code", "name"]:
-                            subjects_data.append((code, name, row))
-                    
-                    # Create student entries
-                    for col_idx, (student_col, student_id) in enumerate(student_cols):
-                        new_student = {
-                            "reg_no": student_id,
-                            "name": f"Student {col_idx + 1}",
-                            "semester": "First Semester Result - Nov / Dec 2025",
-                            "subjects": [],
-                            "page": page_num,
-                        }
-                        
-                        for code, name, row in subjects_data:
-                            if student_col < len(row):
-                                mark = row[student_col]
-                                if mark and mark not in ["", "—", "-"]:
-                                    subject = {
-                                        "code": code,
-                                        "name": name,
-                                        "grade": mark,
-                                        "result": "PASS",
-                                    }
-                                    new_student["subjects"].append(subject)
-                        
-                        if new_student["subjects"]:
-                            students.append(new_student)
-    
-    except Exception as e:
-        print(f"Error in full extraction: {e}")
-    
-    return students
+                        result = "Reappear" if grade.upper() in ["U", "AB", "F", "RA", "SA"] else "Pass"
+                        subjects.append({
+                            "code":   code,
+                            "name":   COURSE_NAME_MAP.get(code, code),
+                            "grade":  grade,
+                            "result": result,
+                        })
+
+                    if subjects:
+                        students.append({
+                            "reg_no":   reg_no,
+                            "name":     name,
+                            "gpa":      gpa,
+                            "subjects": subjects,
+                        })
+
+    return students, meta
 
 
-# ── Slip Generator ────────────────────────────────────────────────────────────
-def build_slip(student: dict, out_path: str, college_name: str, dept_name: str, logo_path: str = None):
-    """Generate a single slip for one student (for A4 2-up layout)."""
-    S = make_styles()
-    # Use half-A4 height for 2 slips per page
-    W, H = 210*mm, 148.5*mm  # Half A4 page (approximately A5 height)
+# ── Build Single Slip ─────────────────────────────────────────────────────────
+def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=None):
+    S      = make_styles()
+    W, H   = A4
+    usable = W - 30 * mm
 
     doc = SimpleDocTemplate(
-        out_path,
-        pagesize=(W, H),
-        leftMargin=8*mm, rightMargin=8*mm,
-        topMargin=6*mm,  bottomMargin=6*mm,
+        out_path, pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm,
+        topMargin=15*mm, bottomMargin=15*mm,
     )
-
     story = []
-    usable_w = W - 16*mm
 
-    # ── Logo and Header Row ──
-    # Create a logo placeholder with text
-    logo_style = ParagraphStyle(
-        "logo", fontName="Helvetica-Bold", fontSize=14,
-        textColor=colors.HexColor("#1a3a5c"), alignment=TA_CENTER, leading=16
+    left_logo = load_logo(left_logo_path)
+    right_logo = load_logo(right_logo_path)
+
+    center_para = Paragraph(
+        f"<b>Anna University, Chennai - 600 025</b><br/>"
+        f"Additional Controller of Examinations<br/>"
+        f"University Departments<br/>"
+        f"<b>{meta['campus'].upper()}</b><br/>"
+        f"{meta['dept']}",
+        S["college_name"]
     )
-    
-    header_row_data = [
-        Paragraph("◆", logo_style),  # Logo placeholder using special character
-        Paragraph(college_name, S["title"]),
-    ]
-    
-    header_row = Table([header_row_data], colWidths=[20*mm, usable_w - 20*mm])
-    header_row.setStyle(TableStyle([
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("BACKGROUND", (0,0), (-1,-1), HEADER_BG),
-        ("TOPPADDING",    (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-    ]))
-    story.append(header_row)
-    story.append(Spacer(1, 2*mm))
 
-    # ── Department and Semester ──
-    info_data = [
-        [Paragraph(dept_name,    S["subtitle"])],
-        [Paragraph(student["semester"], S["subtitle"])],
-    ]
-    dept_tbl = Table(info_data, colWidths=[usable_w])
-    dept_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), HEADER_BG),
-        ("TOPPADDING",    (0,0), (-1,-1), 2),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-        ("LEFTPADDING",   (0,0), (-1,-1), 4),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+    hdr_tbl = Table([[left_logo, center_para]], colWidths=[28*mm, usable - 28*mm])
+    hdr_tbl.setStyle(TableStyle([
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",         (0, 0), (-1, -1),  "CENTER"),
+        ("BOX",           (0, 0), (-1, -1), 0.8, colors.black),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
     ]))
-    story.append(dept_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 3 * mm))
 
-    # ── Student info ──
+    # Banner
+    banner_text = (
+        f"Semester {meta['semester']} Result  |  Session: {meta['session']}  |  "
+        f"Mode: {meta['mode']}  |  Regulation: {meta['regulation']}"
+    )
+    banner = Table([[Paragraph(banner_text, S["college_sub"])]], colWidths=[usable])
+    banner.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.black),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 4 * mm))
+
+    # Student info
     info_data = [
-        [Paragraph("Register No.", S["label"]),
-         Paragraph(student["reg_no"] or "—", S["value"]),
-         Paragraph("Student Name", S["label"]),
-         Paragraph(student["name"] or "—", S["value"])],
+        [
+            Paragraph("Register No.", S["label"]),
+            Paragraph(student["reg_no"] or "—", S["value"]),
+            Paragraph("GPA", S["label"]),
+            Paragraph(student.get("gpa", "—") or "—", S["value"]),
+        ],
+        [
+            Paragraph("Student Name", S["label"]),
+            Paragraph(student["name"] or "—", S["value"]),
+            Paragraph("Branch", S["label"]),
+            Paragraph(meta.get("branch", "—"), S["value"]),
+        ],
     ]
-    col_w = [22*mm, 28*mm, 22*mm, usable_w - 72*mm]
-    info_tbl = Table(info_data, colWidths=col_w)
+    cw = [32*mm, 70*mm, 22*mm, usable - 124*mm]
+    info_tbl = Table(info_data, colWidths=cw)
     info_tbl.setStyle(TableStyle([
-        ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
-        ("INNERGRID",     (0,0), (-1,-1), 0.3, colors.HexColor("#aaaaaa")),
-        ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#f0f4f8")),
-        ("TOPPADDING",    (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-        ("LEFTPADDING",   (0,0), (-1,-1), 4),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 4),
-        ("FONTSIZE",      (0,0), (-1,-1), 7),
+        ("BOX",           (0, 0), (-1, -1), 0.6, colors.black),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.3, colors.black),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 5),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(info_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 4 * mm))
 
-    # ── Marks table ──
-    col_widths = [7*mm, 16*mm, 55*mm, 12*mm, 12*mm]
-    col_widths[2] = usable_w - sum(col_widths[:2]) - col_widths[3] - col_widths[4]
+    # Marks table
+    story.append(Paragraph("MARKS STATEMENT", S["section_title"]))
 
+    cw2 = [10*mm, 26*mm, usable - 10*mm - 26*mm - 20*mm - 26*mm, 20*mm, 26*mm]
     marks_data = [[
         Paragraph("S.No",        S["th"]),
-        Paragraph("Code",        S["th"]),
+        Paragraph("Course Code", S["th"]),
         Paragraph("Course Name", S["th"]),
         Paragraph("Grade",       S["th"]),
         Paragraph("Result",      S["th"]),
     ]]
 
     for i, subj in enumerate(student["subjects"], start=1):
-        bg = ROW_ALT if i % 2 == 0 else colors.white
+        is_fail   = subj["result"] == "Reappear"
+        res_style = ParagraphStyle(
+            f"res_{i}",
+            fontName  = "Helvetica-Bold" if is_fail else "Helvetica",
+            fontSize  = 8,
+            textColor = colors.black,
+            alignment = TA_CENTER,
+        )
         marks_data.append([
-            Paragraph(str(i),         S["td_center"]),
-            Paragraph(subj["code"],   S["td_center"]),
-            Paragraph(subj["name"],   S["td"]),
-            Paragraph(subj["grade"],  S["td_center"]),
-            Paragraph(subj["result"], S["td_center"]),
+            Paragraph(str(i),                 S["td_center"]),
+            Paragraph(subj.get("code", ""),   S["td_center"]),
+            Paragraph(subj.get("name", ""),   S["td"]),
+            Paragraph(subj.get("grade", ""),  S["td_center"]),
+            Paragraph(subj.get("result", ""), res_style),
         ])
 
-    marks_tbl = Table(marks_data, colWidths=col_widths, repeatRows=1)
-    ts = TableStyle([
-        ("BACKGROUND",    (0,0), (-1,0),  HEADER_BG),
-        ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
-        ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
-        ("INNERGRID",     (0,0), (-1,-1), 0.3, colors.HexColor("#cccccc")),
-        ("TOPPADDING",    (0,0), (-1,-1), 2),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-        ("LEFTPADDING",   (0,0), (-1,-1), 3),
-        ("RIGHTPADDING",  (0,0), (-1,-1), 3),
-        ("FONTSIZE",      (0,0), (-1,-1), 6.5),
-        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
-    ])
-    # alternate row background
-    for i in range(1, len(marks_data)):
-        if i % 2 == 0:
-            ts.add("BACKGROUND", (0,i), (-1,i), ROW_ALT)
-    marks_tbl.setStyle(ts)
+    marks_tbl = Table(marks_data, colWidths=cw2, repeatRows=1)
+    marks_tbl.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.6, colors.black),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.3, colors.black),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+    ]))
     story.append(marks_tbl)
+    story.append(Spacer(1, 10 * mm))
 
-    story.append(Spacer(1, 1*mm))
+    # Signatures
+    sig_data = [
+        [Paragraph("___________________", S["sign_label"])] * 3,
+        [
+            Paragraph("Class Advisor",     S["sign_label"]),
+            Paragraph("HOD",               S["sign_label"]),
+            Paragraph("Student Signature", S["sign_label"]),
+        ],
+    ]
+    sig_tbl = Table(sig_data, colWidths=[usable / 3] * 3)
+    sig_tbl.setStyle(TableStyle([
+        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(sig_tbl)
+    story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(
-        "Computer-generated slip. For queries, contact the Examination Cell.",
+        "This is a computer-generated mark slip. "
+        "For discrepancies, contact the Examination Cell.",
         S["footer"]
     ))
 
     doc.build(story)
 
 
-# ── Combine into print-ready PDF (2 slips per A4 page) ────────────────────────
-def combine_slips_2_per_page(slip_paths: list[str], out_path: str):
-    """Merge 2 slips per A4 page."""
-    from reportlab.pdfgen import canvas as pdf_canvas
-    from reportlab.lib.pagesizes import A4
-    from io import BytesIO
-    
-    writer = PdfWriter()
-    
-    for i in range(0, len(slip_paths), 2):
-        # Create a new A4 page
-        pdf_buffer = BytesIO()
-        c = pdf_canvas.Canvas(pdf_buffer, pagesize=A4)
-        width, height = A4
-        
-        # First slip at top
-        try:
-            reader1 = PdfReader(slip_paths[i])
-            page1 = reader1.pages[0]
-            # Scale and position first slip
-            from PyPDF2 import Transformation
-            trans = Transformation().scale(sx=1, sy=1)
-            page1.add_transformation(trans)
-            # Add to top half
-            x, y = 0, height / 2
-            c.translate(0, y)
-            c.scale(1, 1)
-        except Exception as e:
-            print(f"Error reading slip {i}: {e}")
-        
-        # Second slip at bottom (if exists)
-        if i + 1 < len(slip_paths):
-            try:
-                reader2 = PdfReader(slip_paths[i + 1])
-                page2 = reader2.pages[0]
-            except Exception as e:
-                print(f"Error reading slip {i+1}: {e}")
-        
-        c.save()
-        pdf_buffer.seek(0)
-        temp_page = PdfReader(pdf_buffer)
-        for page in temp_page.pages:
-            writer.add_page(page)
-    
-    with open(out_path, "wb") as f:
-        writer.write(f)
-
-
-def combine_slips_simple(slip_paths: list[str], out_path: str):
-    """Merge all individual slips into one PDF."""
+# ── Combine Slips ─────────────────────────────────────────────────────────────
+def combine_slips(slip_paths, out_path):
     writer = PdfWriter()
     for path in slip_paths:
         try:
             reader = PdfReader(path)
-            # Take first page and duplicate it for 2-up layout
             if reader.pages:
-                page = reader.pages[0]
-                writer.add_page(page)
+                writer.add_page(reader.pages[0])
         except Exception as e:
-            print(f"Error processing {path}: {e}")
-    
+            print(f"  Warning: could not add {path}: {e}")
     with open(out_path, "wb") as f:
         writer.write(f)
 
 
+def combine_slips_simple(slip_paths, out_path):
+    """Alias for combine_slips for compatibility with app.py."""
+    return combine_slips(slip_paths, out_path)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Generate student mark slips from PDF")
-    parser.add_argument("--input",   default="marks.pdf", help="Input PDF path")
-    parser.add_argument("--outdir",  default="slips",     help="Output directory for slips")
-    parser.add_argument("--college", default="Madras Institute of Technology",
-                        help="College name for header")
-    parser.add_argument("--dept",    default="Department of Computer Technology",
-                        help="Department name for header")
-    parser.add_argument("--logo",    default=None, help="Path to logo image")
+    parser = argparse.ArgumentParser(description="Generate student mark slips")
+    parser.add_argument("--input",  default="marks.pdf", help="Input PDF path")
+    parser.add_argument("--outdir", default="slips",     help="Output directory")
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Create logo if not provided
-    logo_path = args.logo
-    if not logo_path:
-        logo_path = create_mit_logo(os.path.join(args.outdir, "mit_logo.png"))
-
-    print(f"[1/4] Reading PDF: {args.input}")
-    students = extract_students(args.input)
-    print(f"      Found {len(students)} student(s)")
+    print(f"[1/4] Reading: {args.input}")
+    students, meta = extract_students(args.input)
+    print(f"      Campus   : {meta['campus']}")
+    print(f"      Session  : {meta['session']}")
+    print(f"      Students : {len(students)}")
 
     if not students:
-        print("No student data found. Check PDF format or extraction logic.")
+        print("\n[!] No student data found. Check the PDF format.")
         return
 
-    print("[2/4] Generating individual slips...")
+    print("\n[3/4] Generating slips...")
     slip_paths = []
-    for i, student in enumerate(students, start=1):
-        safe_name = re.sub(r"[^\w]", "_", student["reg_no"] or f"student_{i}")
-        out_path = os.path.join(args.outdir, f"{safe_name}.pdf")
-        build_slip(student, out_path, args.college, args.dept, logo_path)
-        slip_paths.append(out_path)
-        print(f"      [{i}/{len(students)}] {student.get('name', 'Unknown')}")
+    for i, student in enumerate(students, 1):
+        safe = re.sub(r"[^\w]", "_", student["reg_no"] or f"student_{i}")
+        out  = os.path.join(args.outdir, f"{safe}.pdf")
+        build_slip(student, meta, out)
+        slip_paths.append(out)
+        print(f"      [{i:02d}/{len(students)}] {student['name']:<30} -> {student['reg_no']}")
 
-    print("[3/4] Combining slips (2 per A4 page)...")
+    print("\n[4/4] Combining into one PDF...")
     combined = os.path.join(args.outdir, "ALL_SLIPS_PRINT.pdf")
-    combine_slips_simple(slip_paths, combined)
-    print(f"      Created: {combined}")
-
-    print("\n✓ Done!")
-    print(f"  Output PDF → {combined}")
-    print(f"  Individual slips → {args.outdir}/")
+    combine_slips(slip_paths, combined)
+    print(f"      -> {combined}")
+    print("\nDone!")
 
 
 if __name__ == "__main__":

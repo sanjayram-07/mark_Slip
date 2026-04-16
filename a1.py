@@ -35,7 +35,7 @@ COURSE_NAME_MAP = {
     "EN23C01": "Foundation English",
     "MA23C01": "Matrices and Calculus",
     "PH23C01": "Engineering Physics",
-    "UC23H01": "Heritage of Tamils / Tamil Ilakanam",
+    "UC23H01": "Heritage of Tamils",
 }
 
 
@@ -227,12 +227,13 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
     left_logo = load_logo(left_logo_path)
     right_logo = load_logo(right_logo_path)
 
+    dept_display = re.sub(r"^\s*\d+\s*-\s*", "", meta["dept"]).strip()
     center_para = Paragraph(
         f"<b>Anna University, Chennai - 600 025</b><br/>"
         f"Additional Controller of Examinations<br/>"
         f"University Departments<br/>"
         f"<b>{meta['campus'].upper()}</b><br/>"
-        f"{meta['dept']}",
+        f"{dept_display}",
         S["college_name"]
     )
 
@@ -334,27 +335,10 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
     ]))
     story.append(marks_tbl)
     story.append(Spacer(1, 10 * mm))
-
-    # Signatures
-    sig_data = [
-        [Paragraph("___________________", S["sign_label"])] * 3,
-        [
-            Paragraph("Class Advisor",     S["sign_label"]),
-            Paragraph("HOD",               S["sign_label"]),
-            Paragraph("Student Signature", S["sign_label"]),
-        ],
-    ]
-    sig_tbl = Table(sig_data, colWidths=[usable / 3] * 3)
-    sig_tbl.setStyle(TableStyle([
-        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story.append(sig_tbl)
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(
         "This is a computer-generated mark slip. "
-        "For discrepancies, contact the Examination Cell.",
+        "For discrepancies, refer the Result in SEMS-ACOE portal.",
         S["footer"]
     ))
 

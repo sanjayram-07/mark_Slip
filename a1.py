@@ -81,9 +81,17 @@ def make_styles():
             "footer", fontName="Helvetica-Oblique", fontSize=7,
             textColor=colors.black, alignment=TA_CENTER, leading=9
         ),
+        "legend": ParagraphStyle(
+            "legend", fontName="Helvetica", fontSize=11,
+            textColor=colors.black, alignment=TA_CENTER, leading=18
+        ),
+        "report_title": ParagraphStyle(
+            "report_title", fontName="Helvetica-Bold", fontSize=12,
+            textColor=colors.black, alignment=TA_CENTER, leading=14
+        ),
         "sign_label": ParagraphStyle(
-            "sign_label", fontName="Helvetica", fontSize=8,
-            textColor=colors.black, alignment=TA_CENTER, leading=10
+            "sign_label", fontName="Helvetica", fontSize=10,
+            textColor=colors.black, alignment=TA_LEFT, leading=10
         ),
     }
 
@@ -97,6 +105,8 @@ def load_logo(path, max_width=25*mm, max_height=25*mm):
     return Spacer(1, max_height)
 
 
+
+
 # ── PDF Data Extraction ───────────────────────────────────────────────────────
 def extract_students(pdf_path):
     """
@@ -107,7 +117,7 @@ def extract_students(pdf_path):
     meta = {
         "campus":     "Madras Institute of Technology",
         "dept":       "68 - Computer Technology",
-        "branch":     "503 - B.E Computer Science and Engineering",
+        "branch":     "B.E. CSE",
         "semester":   "1",
         "session":    "NOV - 2025",
         "mode":       "Full Time",
@@ -132,15 +142,11 @@ def extract_students(pdf_path):
                 if re.search(r"semester\s*:\s*(\d)", line, re.I):
                     m = re.search(r"semester\s*:\s*(\d)", line, re.I)
                     if m: meta["semester"] = m.group(1).strip()
-                if re.search(r"regulation\s*:", line, re.I):
-                    m = re.search(r"regulation\s*:\s*(\d+)", line, re.I)
-                    if m: meta["regulation"] = m.group(1).strip()
                 if re.search(r"mode\s*:", line, re.I):
                     m = re.search(r"mode\s*:\s*(.+)", line, re.I)
                     if m: meta["mode"] = m.group(1).strip()
                 if re.search(r"branch\s*:", line, re.I):
-                    m = re.search(r"branch\s*:\s*(.+)", line, re.I)
-                    if m: meta["branch"] = m.group(1).strip()
+                    meta["branch"] = "B.E. CSE"
 
             tables = page.extract_tables()
             for table in tables:
@@ -227,13 +233,10 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
     left_logo = load_logo(left_logo_path)
     right_logo = load_logo(right_logo_path)
 
-    dept_display = re.sub(r"^\s*\d+\s*-\s*", "", meta["dept"]).strip()
     center_para = Paragraph(
-        f"<b>Anna University, Chennai - 600 025</b><br/>"
-        f"Additional Controller of Examinations<br/>"
-        f"University Departments<br/>"
-        f"<b>{meta['campus'].upper()}</b><br/>"
-        f"{dept_display}",
+        f"<font size=16><b>DEPARTMENT OF COMPUTER TECHNOLOGY</b></font><br/>"
+        f"<font size=14>ANNA UNIVERSITY, MIT CAMPUS</font><br/>"
+        f"<font size=10>CHROMEPET, CHENNAI 600044, INDIA</font>",
         S["college_name"]
     )
 
@@ -251,11 +254,9 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
     story.append(Spacer(1, 3 * mm))
 
     # Banner
-    banner_text = (
-        f"Semester {meta['semester']} Result  |  Session: {meta['session']}  |  "
-        f"Mode: {meta['mode']}  |  Regulation: {meta['regulation']}"
-    )
-    banner = Table([[Paragraph(banner_text, S["college_sub"])]], colWidths=[usable])
+    banner = Table([[
+        Paragraph("STUDENT FIRST SEMESTER PROGRESS REPORT", S["report_title"])
+    ]], colWidths=[usable])
     banner.setStyle(TableStyle([
         ("BOX",           (0, 0), (-1, -1), 0.5, colors.black),
         ("TOPPADDING",    (0, 0), (-1, -1), 4),
@@ -292,10 +293,7 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(info_tbl)
-    story.append(Spacer(1, 4 * mm))
-
-    # Marks table
-    story.append(Paragraph("MARKS STATEMENT", S["section_title"]))
+    story.append(Spacer(1, 2 * mm))
 
     cw2 = [10*mm, 26*mm, usable - 10*mm - 26*mm - 20*mm - 26*mm, 20*mm, 26*mm]
     marks_data = [[
@@ -334,13 +332,21 @@ def build_slip(student, meta, out_path, left_logo_path=None, right_logo_path=Non
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(marks_tbl)
-    story.append(Spacer(1, 10 * mm))
     story.append(Spacer(1, 4 * mm))
+
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("<b>GRADE RANGE</b>", S["section_title"]))
+    story.append(Spacer(1, 3 * mm))
     story.append(Paragraph(
-        "This is a computer-generated mark slip. "
-        "For discrepancies, refer the Result in SEMS-ACOE portal.",
-        S["footer"]
+        "S:10&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A+:9&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; A:8&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; B+:7<br/>"
+        "B:6&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; C:5&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; U:0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; SA:0&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; WC:0",
+        S["legend"]
     ))
+    story.append(Spacer(1, 22 * mm))
+    story.append(Paragraph("Class Advisor Name:", S["sign_label"]))
+    story.append(Spacer(1, 7 * mm))
+    story.append(Paragraph("Class Advisor Signature:", S["sign_label"]))
+    story.append(Spacer(1, 2 * mm))
 
     doc.build(story)
 
@@ -352,7 +358,8 @@ def combine_slips(slip_paths, out_path):
         try:
             reader = PdfReader(path)
             if reader.pages:
-                writer.add_page(reader.pages[0])
+                for page in reader.pages:
+                    writer.add_page(page)
         except Exception as e:
             print(f"  Warning: could not add {path}: {e}")
     with open(out_path, "wb") as f:
@@ -401,3 +408,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
